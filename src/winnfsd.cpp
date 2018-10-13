@@ -10,8 +10,11 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
+#include <tchar.h>
 
 #define SOCKET_NUM 3
+#define SERVICE_NAME  _T("WinNFSd")
+
 enum
 {
     PORTMAP_PORT = 111,
@@ -32,11 +35,16 @@ static CRPCServer g_RPCServer;
 static CPortmapProg g_PortmapProg;
 static CNFSProg g_NFSProg;
 static CMountProg g_MountProg;
+std::vector<std::vector<std::string>> pPaths;
+
+SERVICE_STATUS_HANDLE g_StatusHandle = NULL;
+SERVICE_STATUS        g_ServiceStatus = { 0 };
+HANDLE                g_ServiceStopEvent = INVALID_HANDLE_VALUE;
 
 static void printUsage(char *pExe)
 {
     printf("\n");
-    printf("Usage: %s [-id <uid> <gid>] [-log on | off] [-pathFile <file>] [-addr <ip>] [export path] [alias path]\n\n", pExe);
+    printf("Usage: %s [-id <uid> <gid>] [-service] [-log on | off] [-pathFile <file>] [-addr <ip>] [export path] [alias path]\n\n", pExe);
     printf("At least a file or a path is needed\n");
     printf("For example:\n");
     printf("On Windows> %s d:\\work\n", pExe);
@@ -64,8 +72,8 @@ static void printAbout(void)
     printf("Copyright (C) 2005 Ming-Yang Kao\n");
     printf("Edited in 2011 by ZeWaren\n");
     printf("Edited in 2013 by Alexander Schneider (Jankowfsky AG)\n");
-	printf("Edited in 2014 2015 by Yann Schepens\n");
-	printf("Edited in 2016 by Peter Philipp (Cando Image GmbH), Marc Harding\n");
+    printf("Edited in 2014 2015 by Yann Schepens\n");
+    printf("Edited in 2016 by Peter Philipp (Cando Image GmbH), Marc Harding\n");
     printLine();
 }
 
@@ -122,124 +130,236 @@ static void printConfirmQuit(void)
 
 static void mountPaths(std::vector<std::vector<std::string>> paths)
 {
-	int i;
-	int numberOfElements = paths.size();
+    int i;
+    int numberOfElements = paths.size();
 
-	for (i = 0; i < numberOfElements; i++) {
-		char *pPath = (char*)paths[i][0].c_str();
-		char *pPathAlias = (char*)paths[i][1].c_str();
-		g_MountProg.Export(pPath, pPathAlias);  //export path for mount
-	}
+    for (i = 0; i < numberOfElements; i++) {
+        char *pPath = (char*)paths[i][0].c_str();
+        char *pPathAlias = (char*)paths[i][1].c_str();
+        g_MountProg.Export(pPath, pPathAlias);  //export path for mount
+    }
 }
 
 static void inputCommand(void)
 {
-	char command[20];
+    char command[20];
 
-	printf("Type 'help' to see help\n\n");
+    printf("Type 'help' to see help\n\n");
 
-	while (true) {
-		fgets(command, 20, stdin);
+    while (true) {
+        fgets(command, 20, stdin);
 
-		if (command[strlen(command) - 1] == '\n') {
-			command[strlen(command) - 1] = '\0';
-		}
+        if (command[strlen(command) - 1] == '\n') {
+            command[strlen(command) - 1] = '\0';
+        }
 
-		if (_stricmp(command, "about") == 0) {
-			printAbout();
-		} else if (_stricmp(command, "help") == 0) {
-			printHelp();
-		} else if (_stricmp(command, "log on") == 0) {
-			g_RPCServer.SetLogOn(true);
-		} else if (_stricmp(command, "log off") == 0) {
-			g_RPCServer.SetLogOn(false);
-		} else if (_stricmp(command, "list") == 0) {
-			printList();
-		} else if (_stricmp(command, "quit") == 0) {
-			if (g_MountProg.GetMountNumber() == 0) {
-				break;
-			} else {
-				printConfirmQuit();
-				fgets(command, 20, stdin);
+        if (_stricmp(command, "about") == 0) {
+            printAbout();
+        } else if (_stricmp(command, "help") == 0) {
+            printHelp();
+        } else if (_stricmp(command, "log on") == 0) {
+            g_RPCServer.SetLogOn(true);
+        } else if (_stricmp(command, "log off") == 0) {
+            g_RPCServer.SetLogOn(false);
+        } else if (_stricmp(command, "list") == 0) {
+            printList();
+        } else if (_stricmp(command, "quit") == 0) {
+            if (g_MountProg.GetMountNumber() == 0) {
+                break;
+            } else {
+                printConfirmQuit();
+                fgets(command, 20, stdin);
 
-				if (command[0] == 'y' || command[0] == 'Y') {
-					break;
-				}
-			}
-		} else if (_stricmp(command, "refresh") == 0) {
-			g_MountProg.Refresh();
-		} else if (_stricmp(command, "reset") == 0) {
-			g_RPCServer.Set(PROG_NFS, NULL);
-		} else if (strcmp(command, "") != 0) {
-			printf("Unknown command: '%s'\n", command);
-			printf("Type 'help' to see help\n");
-		}
-	}
+                if (command[0] == 'y' || command[0] == 'Y') {
+                    break;
+                }
+            }
+        } else if (_stricmp(command, "refresh") == 0) {
+            g_MountProg.Refresh();
+        } else if (_stricmp(command, "reset") == 0) {
+            g_RPCServer.Set(PROG_NFS, NULL);
+        } else if (strcmp(command, "") != 0) {
+            printf("Unknown command: '%s'\n", command);
+            printf("Type 'help' to see help\n");
+        }
+    }
 }
 
-static void start(std::vector<std::vector<std::string>> paths)
+static void start(std::vector<std::vector<std::string>> paths, bool isService = false)
 {
-	int i;
-	CDatagramSocket DatagramSockets[SOCKET_NUM];
-	CServerSocket ServerSockets[SOCKET_NUM];
-	bool bSuccess;
-	hostent *localHost;
+    int i;
+    CDatagramSocket DatagramSockets[SOCKET_NUM];
+    CServerSocket ServerSockets[SOCKET_NUM];
+    bool bSuccess;
+    hostent *localHost;
 
-	g_PortmapProg.Set(PROG_MOUNT, MOUNT_PORT);  //map port for mount
-	g_PortmapProg.Set(PROG_NFS, NFS_PORT);  //map port for nfs
-	g_NFSProg.SetUserID(g_nUID, g_nGID);  //set uid and gid of files
+    g_PortmapProg.Set(PROG_MOUNT, MOUNT_PORT);  //map port for mount
+    g_PortmapProg.Set(PROG_NFS, NFS_PORT);  //map port for nfs
+    g_NFSProg.SetUserID(g_nUID, g_nGID);  //set uid and gid of files
 
-	mountPaths(paths);
+    mountPaths(paths);
 
-	g_RPCServer.Set(PROG_PORTMAP, &g_PortmapProg);  //program for portmap
-	g_RPCServer.Set(PROG_NFS, &g_NFSProg);  //program for nfs
-	g_RPCServer.Set(PROG_MOUNT, &g_MountProg);  //program for mount
-	g_RPCServer.SetLogOn(g_bLogOn);
+    g_RPCServer.Set(PROG_PORTMAP, &g_PortmapProg);  //program for portmap
+    g_RPCServer.Set(PROG_NFS, &g_NFSProg);  //program for nfs
+    g_RPCServer.Set(PROG_MOUNT, &g_MountProg);  //program for mount
+    g_RPCServer.SetLogOn(g_bLogOn);
 
-	for (i = 0; i < SOCKET_NUM; i++) {
-		DatagramSockets[i].SetListener(&g_RPCServer);
-		ServerSockets[i].SetListener(&g_RPCServer);
-	}
+    for (i = 0; i < SOCKET_NUM; i++) {
+        DatagramSockets[i].SetListener(&g_RPCServer);
+        ServerSockets[i].SetListener(&g_RPCServer);
+    }
 
-	bSuccess = false;
+    bSuccess = false;
 
-	if (ServerSockets[0].Open(PORTMAP_PORT, 3) && DatagramSockets[0].Open(PORTMAP_PORT)) { //start portmap daemon
-		printf("Portmap daemon started\n");
+    if (ServerSockets[0].Open(PORTMAP_PORT, 3) && DatagramSockets[0].Open(PORTMAP_PORT)) { //start portmap daemon
+        printf("Portmap daemon started\n");
 
-		if (ServerSockets[1].Open(NFS_PORT, 10) && DatagramSockets[1].Open(NFS_PORT)) { //start nfs daemon
-			printf("NFS daemon started\n");
+        if (ServerSockets[1].Open(NFS_PORT, 10) && DatagramSockets[1].Open(NFS_PORT)) { //start nfs daemon
+            printf("NFS daemon started\n");
 
-			if (ServerSockets[2].Open(MOUNT_PORT, 3) && DatagramSockets[2].Open(MOUNT_PORT)) { //start mount daemon
-				printf("Mount daemon started\n");
-				bSuccess = true;  //all daemon started
-			} else {
-				printf("Mount daemon starts failed (check if port 1058 is not already in use ;) ).\n");
-			}
-		} else {
-			printf("NFS daemon starts failed.\n");
-		}
-	} else {
-		printf("Portmap daemon starts failed.\n");
-	}
+            if (ServerSockets[2].Open(MOUNT_PORT, 3) && DatagramSockets[2].Open(MOUNT_PORT)) { //start mount daemon
+                printf("Mount daemon started\n");
+                bSuccess = true;  //all daemon started
+            } else {
+                printf("Mount daemon starts failed (check if port 1058 is not already in use ;) ).\n");
+            }
+        } else {
+            printf("NFS daemon starts failed.\n");
+        }
+    } else {
+        printf("Portmap daemon starts failed.\n");
+    }
 
 
-	if (bSuccess) {
-		localHost = gethostbyname("");
-		printf("Listening on %s\n", g_sInAddr);  //local address
-		inputCommand();  //wait for commands
-	}
+    if (bSuccess) {
+        localHost = gethostbyname("");
+        printf("Listening on %s\n", g_sInAddr);  //local address
 
-	for (i = 0; i < SOCKET_NUM; i++) {
-		DatagramSockets[i].Close();
-		ServerSockets[i].Close();
-	}
+        if (isService) {
+            //  Wait untill the service has been requested to stop
+            WaitForSingleObject(g_ServiceStopEvent, INFINITE);
+        } else {
+            inputCommand();  //wait for commands
+        }
+    }
+
+    for (i = 0; i < SOCKET_NUM; i++) {
+        DatagramSockets[i].Close();
+        ServerSockets[i].Close();
+    }
+}
+
+DWORD WINAPI ServiceWorkerThread(LPVOID lpParam)
+{
+    start(pPaths, true);
+
+    return ERROR_SUCCESS;
+}
+
+VOID WINAPI ServiceCtrlHandler(DWORD CtrlCode)
+{
+    // Handle the state changes
+    switch (CtrlCode)
+    {
+    case SERVICE_CONTROL_STOP:
+
+        if (g_ServiceStatus.dwCurrentState != SERVICE_RUNNING) {
+            break;
+        }
+
+        g_ServiceStatus.dwControlsAccepted = 0;
+        g_ServiceStatus.dwCurrentState = SERVICE_STOP_PENDING;
+        g_ServiceStatus.dwWin32ExitCode = 0;
+        g_ServiceStatus.dwCheckPoint = 4;
+
+        if (SetServiceStatus(g_StatusHandle, &g_ServiceStatus) == FALSE) {
+            OutputDebugString(_T("WinNFSd: ServiceCtrlHandler: SetServiceStatus returned error"));
+        }
+
+        // This will signal the worker thread to start shutting down
+        SetEvent(g_ServiceStopEvent);
+
+        break;
+    default:
+        break;
+    }
+}
+
+VOID WINAPI ServiceMain(DWORD argc, LPSTR *argv)
+{
+    DWORD Status = E_FAIL;
+
+    g_StatusHandle = RegisterServiceCtrlHandler(SERVICE_NAME, ServiceCtrlHandler);
+
+    if (g_StatusHandle == NULL) {
+        return;
+    }
+
+    // Tell the service controller we are starting
+    ZeroMemory(&g_ServiceStatus, sizeof(g_ServiceStatus));
+    g_ServiceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
+    g_ServiceStatus.dwControlsAccepted = 0;
+    g_ServiceStatus.dwCurrentState = SERVICE_START_PENDING;
+    g_ServiceStatus.dwWin32ExitCode = 0;
+    g_ServiceStatus.dwServiceSpecificExitCode = 0;
+    g_ServiceStatus.dwCheckPoint = 0;
+
+    if (SetServiceStatus(g_StatusHandle, &g_ServiceStatus) == FALSE) {
+        OutputDebugString(_T("WinNFSd: ServiceMain: SetServiceStatus returned error"));
+    }
+
+    // Create a service stop event to wait on after start
+    g_ServiceStopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (g_ServiceStopEvent == NULL) {
+        // Error creating event
+        // Tell service controller we are stopped and exit
+        g_ServiceStatus.dwControlsAccepted = 0;
+        g_ServiceStatus.dwCurrentState = SERVICE_STOPPED;
+        g_ServiceStatus.dwWin32ExitCode = GetLastError();
+        g_ServiceStatus.dwCheckPoint = 1;
+
+        if (SetServiceStatus(g_StatusHandle, &g_ServiceStatus) == FALSE)
+        {
+            OutputDebugString(_T("WinNFSd: ServiceMain: SetServiceStatus returned error"));
+        }
+
+        return;
+    }
+
+    // Tell the service controller we are started
+    g_ServiceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP;
+    g_ServiceStatus.dwCurrentState = SERVICE_RUNNING;
+    g_ServiceStatus.dwWin32ExitCode = 0;
+    g_ServiceStatus.dwCheckPoint = 0;
+
+    if (SetServiceStatus(g_StatusHandle, &g_ServiceStatus) == FALSE) {
+        OutputDebugString(_T("WinNFSd: ServiceMain: SetServiceStatus returned error"));
+    }
+
+    // Start a thread that will perform the main task of the service
+    HANDLE hThread = CreateThread(NULL, 0, ServiceWorkerThread, NULL, 0, NULL);
+
+    // Wait until our worker thread exits signaling that the service needs to stop
+    WaitForSingleObject(hThread, INFINITE);
+
+    CloseHandle(g_ServiceStopEvent);
+
+    // Tell the service controller we are stopped
+    g_ServiceStatus.dwControlsAccepted = 0;
+    g_ServiceStatus.dwCurrentState = SERVICE_STOPPED;
+    g_ServiceStatus.dwWin32ExitCode = 0;
+    g_ServiceStatus.dwCheckPoint = 3;
+
+    if (SetServiceStatus(g_StatusHandle, &g_ServiceStatus) == FALSE) {
+        OutputDebugString(_T("WinNFSd: ServiceMain: SetServiceStatus returned error"));
+    }
 }
 
 int main(int argc, char *argv[])
 {
-    std::vector<std::vector<std::string>> pPaths;
     char *pPath = NULL;
-	bool pathFile = false;
+    bool pathFile = false;
+    bool service = false;
 
     WSADATA wsaData;
 
@@ -255,7 +375,7 @@ int main(int argc, char *argv[])
     g_nUID = g_nGID = 0;
     g_bLogOn = true;
     g_sFileName = NULL;
-	g_sInAddr = "0.0.0.0";
+    g_sInAddr = "0.0.0.0";
 
     for (int i = 1; i < argc; i++) {//parse parameters
         if (_stricmp(argv[i], "-id") == 0) {
@@ -264,17 +384,20 @@ int main(int argc, char *argv[])
         } else if (_stricmp(argv[i], "-log") == 0) {
             g_bLogOn = _stricmp(argv[++i], "off") != 0;
         } else if (_stricmp(argv[i], "-addr") == 0) {
-			g_sInAddr = argv[++i];
-		} else if (_stricmp(argv[i], "-pathFile") == 0) {
+            g_sInAddr = argv[++i];
+        } else if (_stricmp(argv[i], "-pathFile") == 0) {
             g_sFileName = argv[++i];
 
-			if (g_MountProg.SetPathFile(g_sFileName) == false) {
+            if (g_MountProg.SetPathFile(g_sFileName) == false) {
                 printf("Can't open file %s.\n", g_sFileName);
                 return 1;
-			} else {
-				g_MountProg.Refresh();
-				pathFile = true;
-			}
+            } else {
+                g_MountProg.Refresh();
+                pathFile = true;
+            }
+        } else if (_stricmp(argv[i], "-service") == 0) {
+            service = true;
+            g_bLogOn = false;
         } else if (i == argc - 2) {
             pPath = argv[argc - 2];  //path is before the last parameter
 
@@ -312,13 +435,25 @@ int main(int argc, char *argv[])
         ShowWindow(console, SW_HIDE); // hides the window
     }
 
-	if (pPaths.size() <= 0 && !pathFile) {
+    if (pPaths.size() <= 0 && !pathFile) {
         printf("No paths to mount\n");
         return 1;
     }
 
     WSAStartup(0x0101, &wsaData);
-    start(pPaths);
+
+    if (service) {
+        SERVICE_TABLE_ENTRY ServiceTable[] = {
+            { SERVICE_NAME, (LPSERVICE_MAIN_FUNCTION)ServiceMain},
+            { NULL, NULL}
+        };
+
+        if (StartServiceCtrlDispatcher(ServiceTable) == FALSE) {
+            return GetLastError();
+        }
+    } else {
+        start(pPaths);
+    }
     WSACleanup();
 
     return 0;
