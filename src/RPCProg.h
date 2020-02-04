@@ -35,9 +35,12 @@ class CRPCProg
     virtual ~CRPCProg();
     virtual int Process(IInputStream *pInStream, IOutputStream *pOutStream, ProcessParam *pParam) = 0;
     virtual void SetLogOn(bool bLogOn);
+    virtual void WriteToFile(const char *pFileName);
 
     protected:
     bool m_bLogOn;
+    FILE* m_pFile;
+
     virtual int PrintLog(const char *format, ...);
 };
 
